@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Text;
 using System.Net.Http;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
 var config = builder.Configuration;
@@ -60,7 +61,7 @@ if (!string.IsNullOrEmpty(appBaseUrl))
 }
 
 // Endpoint que recibirá updates de Telegram
-app.MapPost("/bot/update", async (Update update,
+app.MapPost("/bot/update", async ([FromBody] Update update,  // 👈 fuerza binding desde el body
                                   ITelegramBotClient botClient,
                                   GeminiService geminiService,
                                   CancellationToken cancellationToken) =>

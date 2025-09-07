@@ -2,7 +2,7 @@ trigger:
 - main   # Rama que dispara el pipeline (ajústalo a tu rama)
 
 pool:
-  vmImage: 'windows-latest'
+  vmImage: 'ubuntu-latest'
 
 variables:
   buildConfiguration: 'Release'
@@ -28,15 +28,7 @@ steps:
     projects: '**/*.csproj'
     arguments: '--configuration $(buildConfiguration) --no-restore'
 
-# Paso 4: Ejecutar pruebas (si no tienes, se puede quitar)
-- task: DotNetCoreCLI@2
-  inputs:
-    command: 'test'
-    projects: '**/*Tests.csproj'
-    arguments: '--configuration $(buildConfiguration) --no-build --verbosity normal'
-  continueOnError: true   # Si no hay tests, no falla el pipeline
-
-# Paso 5: Publicar artefacto
+# Paso 4: Publicar artefacto
 - task: DotNetCoreCLI@2
   inputs:
     command: 'publish'
@@ -44,16 +36,19 @@ steps:
     arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)'
     zipAfterPublish: true
 
-# Paso 6: Guardar artefacto para despliegue
+# Paso 5: Guardar artefacto para despliegue
 - task: PublishBuildArtifacts@1
   inputs:
     PathtoPublish: '$(Build.ArtifactStagingDirectory)'
     ArtifactName: 'drop'
     publishLocation: 'Container'
 
-# Paso 7: Desplegar a Azure App Service
-- task: AzureWebApp@1
+# Paso 6: Desplegar a Azure App Service
+- task: AzureRmWebAppDeployment@5
+  displayName: 'Deploy'
   inputs:
-    azureSubscription: '<NombreConexionAzure>'   # Se configura en Azure DevOps > Project Settings > Service connections
-    appName: '<NombreDeTuAppService>'           # Nombre de tu Web App en Azure
-    package: '$(Build.ArtifactStagingDirectory)/**/*.zip'
+      ConnectionType: 'AzureRM'
+      azureSubscription: 'Azure for Students(6de4e792-2625-4a2a-88bf-784c5e65d4e8)'
+      appType: 'webAppLinux'
+      WebAppName: 'accountingmanager'
+      packageForLinux: '$(System.DefaultWorkingDirectory)/**/*.zip'
