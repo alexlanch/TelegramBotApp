@@ -1,0 +1,50 @@
+trigger:
+- main   # se ejecuta cuando haces push a main
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  buildConfiguration: 'Release'
+
+steps:
+# 1. Restaurar dependencias
+- task: UseDotNet@2
+  inputs:
+    packageType: 'sdk'
+    version: '8.x'
+    installationPath: $(Agent.ToolsDirectory)/dotnet
+
+- task: DotNetCoreCLI@2
+  inputs:
+    command: 'restore'
+    projects: '**/*.csproj'
+
+# 2. Compilar
+- task: DotNetCoreCLI@2
+  inputs:
+    command: 'build'
+    projects: '**/*.csproj'
+    arguments: '--configuration $(buildConfiguration)'
+
+# 3. Publicar artefacto
+- task: DotNetCoreCLI@2
+  inputs:
+    command: 'publish'
+    publishWebProjects: true
+    arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)'
+    zipAfterPublish: true
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    ArtifactName: 'drop'
+    publishLocation: 'Container'
+
+# 4. Desplegar en App Service
+- task: AzureWebApp@1
+  inputs:
+    azureSubscription: 'NombreConexionAzure'  # crear Service Connection
+    appType: 'webApp'
+    appName: 'NombreDeTuAppService'
+    package: '$(Build.ArtifactStagingDirectory)/**/*.zip'
