@@ -61,40 +61,40 @@ if (!string.IsNullOrEmpty(appBaseUrl))
 }
 
 // Endpoint que recibirá updates de Telegram
-app.MapPost("/bot/update", async ([FromBody] Update update,  // 👈 fuerza binding desde el body
-                                  ITelegramBotClient botClient,
-                                  GeminiService geminiService,
-                                  CancellationToken cancellationToken) =>
+app.MapPost("/bot/update", async (
+    JsonElement body,
+    ITelegramBotClient botClient,
+    GeminiService geminiService,
+    CancellationToken cancellationToken) =>
 {
     try
     {
+        var update = JsonSerializer.Deserialize<Update>(body.GetRawText());
+
         if (update?.Message?.Text == null)
-            return Results.Ok(); // nada que hacer
+            return Results.Ok();
 
         var messageText = update.Message.Text;
         var chatId = update.Message.Chat.Id;
-        var user = update.Message.Chat.Username ?? update.Message.Chat.FirstName ?? update.Message.Chat.Id.ToString();
+        var user = update.Message.Chat.Username
+                   ?? update.Message.Chat.FirstName
+                   ?? update.Message.Chat.Id.ToString();
 
-        // Guardar mensaje (async)
         await GuardarMensajeAsync(connectionString, user, messageText);
-
-        // Obtener contexto (los últimos N mensajes formateados)
         var contexto = await ObtenerContextoAsync(connectionString, user, limite: 50);
-
-        // Llamar a Gemini (o tu servicio de IA)
         var respuesta = await geminiService.ConsultarGemini(contexto, messageText);
 
-        // Responder por Telegram
         await botClient.SendTextMessageAsync(chatId, respuesta, cancellationToken: cancellationToken);
 
         return Results.Ok();
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error procesando update: {ex.Message}");
-        return Results.Ok(); // siempre devolver 200 a Telegram para no reintentar en exceso
+        Console.WriteLine($"❌ Error procesando update: {ex}");
+        return Results.Ok();
     }
 });
+
 
 app.Run();
 
