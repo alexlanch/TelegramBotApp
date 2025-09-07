@@ -1,5 +1,5 @@
 trigger:
-- main   # se ejecuta cuando haces push a main
+- main   # Rama que dispara el pipeline (ajústalo a tu rama)
 
 pool:
   vmImage: 'windows-latest'
@@ -8,26 +8,35 @@ variables:
   buildConfiguration: 'Release'
 
 steps:
-# 1. Restaurar dependencias
+# Paso 1: Usar .NET 8
 - task: UseDotNet@2
   inputs:
     packageType: 'sdk'
-    version: '8.x'
+    version: '8.0.x'
     installationPath: $(Agent.ToolsDirectory)/dotnet
 
+# Paso 2: Restaurar dependencias
 - task: DotNetCoreCLI@2
   inputs:
     command: 'restore'
     projects: '**/*.csproj'
 
-# 2. Compilar
+# Paso 3: Compilar
 - task: DotNetCoreCLI@2
   inputs:
     command: 'build'
     projects: '**/*.csproj'
-    arguments: '--configuration $(buildConfiguration)'
+    arguments: '--configuration $(buildConfiguration) --no-restore'
 
-# 3. Publicar artefacto
+# Paso 4: Ejecutar pruebas (si no tienes, se puede quitar)
+- task: DotNetCoreCLI@2
+  inputs:
+    command: 'test'
+    projects: '**/*Tests.csproj'
+    arguments: '--configuration $(buildConfiguration) --no-build --verbosity normal'
+  continueOnError: true   # Si no hay tests, no falla el pipeline
+
+# Paso 5: Publicar artefacto
 - task: DotNetCoreCLI@2
   inputs:
     command: 'publish'
@@ -35,16 +44,16 @@ steps:
     arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)'
     zipAfterPublish: true
 
+# Paso 6: Guardar artefacto para despliegue
 - task: PublishBuildArtifacts@1
   inputs:
     PathtoPublish: '$(Build.ArtifactStagingDirectory)'
     ArtifactName: 'drop'
     publishLocation: 'Container'
 
-# 4. Desplegar en App Service
+# Paso 7: Desplegar a Azure App Service
 - task: AzureWebApp@1
   inputs:
-    azureSubscription: 'NombreConexionAzure'  # crear Service Connection
-    appType: 'webApp'
-    appName: 'NombreDeTuAppService'
+    azureSubscription: '<NombreConexionAzure>'   # Se configura en Azure DevOps > Project Settings > Service connections
+    appName: '<NombreDeTuAppService>'           # Nombre de tu Web App en Azure
     package: '$(Build.ArtifactStagingDirectory)/**/*.zip'
