@@ -1,120 +1,154 @@
-﻿using System.Text.Json;
+﻿using Microsoft.Data.SqlClient;
 using Telegram.Bot;
 using Telegram.Bot.Types;
-using Microsoft.Data.SqlClient;
-using System.Net.Http;
-using Telegram.Bot.Polling;
-using System.Text;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
+using System.Threading;
 using System.Threading.Tasks;
-using System.Collections.Generic;
 using System;
-using Telegram.Bot.Types.Enums;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.Text;
+using System.Net.Http;
+using Microsoft.AspNetCore.Http;
 
-class Program
+var builder = WebApplication.CreateBuilder(args);
+var config = builder.Configuration;
+
+// --- Configurar servicios ---
+// lee variables desde appsettings o variables de entorno (Azure App Settings)
+var telegramToken = config["TelegramToken"];
+var geminiApiKey = config["GeminiApiKey"];
+var connectionString = config.GetConnectionString("DefaultConnection") ?? config["ConnectionStrings:DefaultConnection"];
+
+// valida que existan (en desarrollo puedes lanzar excepción si faltan)
+if (string.IsNullOrEmpty(telegramToken))
+    throw new InvalidOperationException("Falta TELEGRAM token en configuración (TelegramToken).");
+if (string.IsNullOrEmpty(connectionString))
+    throw new InvalidOperationException("Falta cadena de conexión en configuración (ConnectionStrings:DefaultConnection).");
+
+// Registrar cliente Telegram
+builder.Services.AddSingleton<ITelegramBotClient>(sp => new TelegramBotClient(telegramToken));
+
+// Registrar GeminiService como typed client (inyecta HttpClient y la apiKey)
+builder.Services.AddHttpClient<GeminiService>()
+    .ConfigureHttpClient(client => {
+        // opcional: timeout o headers globales
+        client.Timeout = TimeSpan.FromSeconds(60);
+    });
+builder.Services.AddSingleton(sp =>
 {
-    private static string telegramToken = "7799080092:AAE5BB_IVmMtw7zgcY_2Z_G2aAciLYR5_pU";
-    private static string _apiKey = "AIzaSyDNkd2CaRjaGyZ_HsQblzwACuTuq6os_HU";
-    private static string dbConnectionString = "DATA SOURCE=DESKTOP-2S6R7FK\\SQLEXPRESS;INITIAL CATALOG=FinanceDB;USER=sa;PASSWORD=SatrackAL24*;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=True";
+    var http = sp.GetRequiredService<HttpClient>();
+    return new GeminiService(geminiApiKey, http);
+});
 
-    private static TelegramBotClient bot;
-    private static GeminiService geminiService;
+var app = builder.Build();
 
-    static async Task Main()
+// --- Setear webhook automáticamente si APP_BASE_URL está configurada ---
+var appBaseUrl = config["AppBaseUrl"]; // ej: https://miapp.azurewebsites.net
+if (!string.IsNullOrEmpty(appBaseUrl))
+{
+    var botClient = app.Services.GetRequiredService<ITelegramBotClient>();
+    var webhookUrl = $"{appBaseUrl.TrimEnd('/')}/bot/update";
+    Console.WriteLine($"Setting Telegram webhook -> {webhookUrl}");
+    // setear webhook (await dentro de inicio)
+    await botClient.SetWebhookAsync(webhookUrl);
+    Console.WriteLine("Webhook registrado.");
+}
+
+// Endpoint que recibirá updates de Telegram
+app.MapPost("/bot/update", async (Update update,
+                                  ITelegramBotClient botClient,
+                                  GeminiService geminiService,
+                                  CancellationToken cancellationToken) =>
+{
+    try
     {
-        bot = new TelegramBotClient(telegramToken);
-        geminiService = new GeminiService(_apiKey);
+        if (update?.Message?.Text == null)
+            return Results.Ok(); // nada que hacer
 
-        // Inicializar DB
-        using (var conn = new SqlConnection(dbConnectionString))
-        {
-            await conn.OpenAsync();
-        }
-
-        var receiverOptions = new ReceiverOptions
-        {
-            AllowedUpdates = Array.Empty<UpdateType>()
-        };
-
-        bot.StartReceiving(
-            updateHandler: HandleUpdateAsync,
-            pollingErrorHandler: HandleErrorAsync,
-            receiverOptions: receiverOptions
-        );
-
-        var me = await bot.GetMeAsync();
-        Console.WriteLine($"🤖 Bot {me.Username} iniciado. Presiona Ctrl+C para salir.");
-        await Task.Delay(-1);
-    }
-
-    static Task HandleErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken token)
-    {
-        Console.WriteLine($"❌ Error: {exception.Message}");
-        return Task.CompletedTask;
-    }
-
-    static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken token)
-    {
-        if (update.Message is not { Text: { } messageText }) return;
-
+        var messageText = update.Message.Text;
         var chatId = update.Message.Chat.Id;
-        var user = update.Message.Chat.FirstName ?? "Usuario";
+        var user = update.Message.Chat.Username ?? update.Message.Chat.FirstName ?? update.Message.Chat.Id.ToString();
 
-        GuardarMensaje(user, messageText);
-        var contexto = ObtenerContexto(user);
+        // Guardar mensaje (async)
+        await GuardarMensajeAsync(connectionString, user, messageText);
 
-        // Obtener respuesta de Gemini
-        var response = await geminiService.ConsultarGemini(contexto, messageText);
+        // Obtener contexto (los últimos N mensajes formateados)
+        var contexto = await ObtenerContextoAsync(connectionString, user, limite: 50);
 
-        await botClient.SendTextMessageAsync(chatId, response, cancellationToken: token);
+        // Llamar a Gemini (o tu servicio de IA)
+        var respuesta = await geminiService.ConsultarGemini(contexto, messageText);
+
+        // Responder por Telegram
+        await botClient.SendTextMessageAsync(chatId, respuesta, cancellationToken: cancellationToken);
+
+        return Results.Ok();
     }
-
-    static void GuardarMensaje(string usuario, string texto)
+    catch (Exception ex)
     {
-        try
-        {
-            using var conn = new SqlConnection(dbConnectionString);
-            conn.Open();
-            var cmd = conn.CreateCommand();
-            cmd.CommandText = "INSERT INTO Mensajes (Usuario, Texto, FechaHora) VALUES (@u, @t, @f)";
-            cmd.Parameters.AddWithValue("@u", usuario);
-            cmd.Parameters.AddWithValue("@t", texto);
-            cmd.Parameters.AddWithValue("@f", DateTime.Now);
-            cmd.ExecuteNonQuery();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error guardando mensaje: {ex.Message}");
-        }
+        Console.WriteLine($"Error procesando update: {ex.Message}");
+        return Results.Ok(); // siempre devolver 200 a Telegram para no reintentar en exceso
     }
+});
 
-    static string ObtenerContexto(string usuario, int limite = 100)
+app.Run();
+
+
+// ----------------- Helpers DB (async) -----------------
+static async Task GuardarMensajeAsync(string connectionString, string usuario, string texto)
+{
+    try
     {
-        try
+        await using var conn = new SqlConnection(connectionString);
+        await conn.OpenAsync();
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO Mensajes (Usuario, Texto, FechaHora) VALUES (@u, @t, @f)";
+        cmd.Parameters.AddWithValue("@u", usuario);
+        cmd.Parameters.AddWithValue("@t", texto);
+        cmd.Parameters.AddWithValue("@f", DateTime.UtcNow); // usa UTC para consistencia
+        await cmd.ExecuteNonQueryAsync();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error guardando mensaje: {ex.Message}");
+    }
+}
+
+static async Task<string> ObtenerContextoAsync(string connectionString, string usuario, int limite = 10)
+{
+    try
+    {
+        await using var conn = new SqlConnection(connectionString);
+        await conn.OpenAsync();
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT TOP (@l) Texto, FechaHora FROM Mensajes WHERE Usuario = @u ORDER BY Id DESC";
+        cmd.Parameters.AddWithValue("@u", usuario);
+        cmd.Parameters.AddWithValue("@l", limite);
+
+        var mensajes = new List<(string Texto, DateTime FechaHora)>();
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
         {
-            using var conn = new SqlConnection(dbConnectionString);
-            conn.Open();
-            var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT TOP (@l) Texto, FechaHora FROM Mensajes WHERE Usuario = @u ORDER BY Id DESC";
-            cmd.Parameters.AddWithValue("@u", usuario);
-            cmd.Parameters.AddWithValue("@l", limite);
-            using var reader = cmd.ExecuteReader();
-
-            var mensajes = new List<(string Texto, DateTime FechaHora)>();
-
-            while (reader.Read())
-            {
-                var texto = reader.GetString(0);         // Columna Texto
-                var fecha = reader.GetDateTime(1);       // Columna FechaHora
-                mensajes.Insert(0, (texto, fecha));      // Insertar como tupla
-            }
-
-            return string.Join("\n", mensajes);
+            var texto = reader.IsDBNull(0) ? string.Empty : reader.GetString(0);
+            var fecha = reader.IsDBNull(1) ? DateTime.MinValue : reader.GetDateTime(1);
+            mensajes.Insert(0, (texto, fecha)); // insertamos al inicio para invertir el ORDER BY DESC
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error obteniendo contexto: {ex.Message}");
-            return string.Empty;
-        }
+
+        // Formatear la lista: "YYYY-MM-DD HH:mm - Texto"
+        var lines = mensajes.Select(m => $"{m.FechaHora:yyyy-MM-dd HH:mm} - {m.Texto}");
+        return string.Join("\n", lines);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error obteniendo contexto: {ex.Message}");
+        return string.Empty;
     }
 }
 
@@ -123,31 +157,25 @@ public class GeminiService
     private readonly string _apiKey;
     private readonly HttpClient _httpClient;
 
-    public GeminiService(string apiKey)
+    public GeminiService(string apiKey, HttpClient httpClient)
     {
-        _apiKey = apiKey;
-        _httpClient = new HttpClient();
+        _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
+        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
     }
 
-    public async Task<string> ConsultarGemini(string mensaje, string nuevoTexto)
+    public async Task<string> ConsultarGemini(string contexto, string nuevoTexto)
     {
         try
         {
-            // Construir el prompt completo
-            string prompt = $"Contexto previo:\n{mensaje}\n\nNueva entrada:\n{nuevoTexto}\n\nRespuesta:";
+            string prompt = $"Contexto previo:\n{contexto}\n\nNueva entrada:\n{nuevoTexto}\n\nRespuesta:";
 
-            // URL CORRECTA para la API de Gemini
             string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={_apiKey}";
 
-            // Preparar el payload
             var payload = new
             {
-                contents = new[]
-                {
-                    new
-                    {
-                        parts = new[]
-                        {
+                contents = new[] {
+                    new {
+                        parts = new[] {
                             new { text = prompt }
                         }
                     }
@@ -161,21 +189,19 @@ public class GeminiService
                 }
             };
 
-            // Serializar a JSON
             var json = JsonSerializer.Serialize(payload);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            // Realizar la petición
             var response = await _httpClient.PostAsync(url, content);
             response.EnsureSuccessStatusCode();
 
-            // Leer y procesar la respuesta
             var responseJson = await response.Content.ReadAsStringAsync();
             return ProcesarRespuestaGemini(responseJson);
         }
         catch (Exception ex)
         {
-            return $"Error: {ex.Message}";
+            Console.WriteLine($"Error en GeminiService: {ex.Message}");
+            return "Lo siento, ocurrió un error al procesar la petición.";
         }
     }
 
@@ -186,7 +212,7 @@ public class GeminiService
             using var doc = JsonDocument.Parse(jsonResponse);
             var root = doc.RootElement;
 
-            // Extraer el texto de la respuesta
+            // Ajusta según la estructura real que recibas
             var text = root
                 .GetProperty("candidates")[0]
                 .GetProperty("content")
@@ -198,9 +224,8 @@ public class GeminiService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error procesando respuesta: {ex.Message}");
+            Console.WriteLine($"Error procesando respuesta Gemini: {ex.Message}");
             return "Error procesando la respuesta JSON";
         }
     }
 }
-
