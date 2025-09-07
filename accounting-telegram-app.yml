@@ -51,4 +51,4 @@ steps:
       azureSubscription: 'Azure for Students(6de4e792-2625-4a2a-88bf-784c5e65d4e8)'
       appType: 'webAppLinux'
       WebAppName: 'accountingmanager'
-      packageForLinux: '$(System.DefaultWorkingDirectory)/**/*.zip'
+      packageForLinux: '$(Build.ArtifactStagingDirectory)/**/*.zip'
